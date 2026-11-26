@@ -15,6 +15,7 @@ jobs:
   build-arm64:
     name: Build linux/arm64
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       GOOS: linux
       GOARCH: arm64
@@ -52,8 +53,10 @@ jobs:
             -v ./main
           chmod +x build_assets/xray
 
-      - name: Verify binary architecture
+      - name: Verify architecture and run xray version
         run: |
+          set -uo pipefail
+
           file build_assets/xray
           if ! file build_assets/xray | grep -q 'ARM aarch64'; then
             echo "::error::Built binary is not a Linux ARM64 (aarch64) executable"
@@ -61,11 +64,37 @@ jobs:
           fi
           echo "Architecture check passed: Linux ARM64 (aarch64)"
 
-      - name: Verify xray version via QEMU
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-user-static
-          qemu-aarch64-static build_assets/xray version | tee version.txt
+          # Locate an aarch64 user-mode emulator. Some runner images ship one,
+          # so check first and only install when it is really missing.
+          QEMU=""
+          for candidate in qemu-aarch64-static qemu-aarch64; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+              QEMU="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$QEMU" ]; then
+            echo "No preinstalled aarch64 emulator found, trying apt..."
+            sudo apt-get update -q || true
+            (sudo apt-get install -y -q qemu-user || sudo apt-get install -y -q qemu-user-static) || true
+            for candidate in qemu-aarch64-static qemu-aarch64; do
+              if command -v "$candidate" >/dev/null 2>&1; then
+                QEMU="$candidate"
+                break
+              fi
+            done
+          fi
+
+          if [ -n "$QEMU" ]; then
+            echo "Running xray under $QEMU"
+            "$QEMU" build_assets/xray version | tee version.txt
+          else
+            echo "Falling back to Docker binfmt emulation..."
+            docker run --privileged --rm tonistiigi/binfmt --install arm64
+            ./build_assets/xray version | tee version.txt
+          fi
+
           grep -q 'linux/arm64' version.txt
           echo "xray version check passed: binary reports linux/arm64"
 
