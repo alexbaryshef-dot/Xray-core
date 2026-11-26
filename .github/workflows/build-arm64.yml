@@ -1,0 +1,89 @@
+name: Build ARM64 (Keenetic)
+
+# Manually triggered build of this fork for Linux ARM64 (aarch64) routers,
+# e.g. Keenetic. Produces a ready-to-use `xray` binary packaged as
+# xray-linux-arm64.tar.gz and stores it as a GitHub Actions artifact.
+# It does not publish releases and does not touch existing workflows.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64:
+    name: Build linux/arm64
+    runs-on: ubuntu-latest
+    env:
+      GOOS: linux
+      GOARCH: arm64
+      CGO_ENABLED: "0"
+    steps:
+      - name: Checkout codebase
+        uses: actions/checkout@v7
+
+      - name: Set up Go (version from go.mod)
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Show build environment
+        run: |
+          echo "GOOS=$GOOS"
+          echo "GOARCH=$GOARCH"
+          echo "CGO_ENABLED=$CGO_ENABLED"
+          go version
+          go env GOOS GOARCH CGO_ENABLED
+          git log -1 --oneline
+
+      - name: Get project dependencies
+        run: go mod download
+
+      - name: Build Xray
+        run: |
+          mkdir -p build_assets
+          COMMID=$(git describe --always --dirty)
+          go build -o build_assets/xray \
+            -trimpath -buildvcs=false \
+            -gcflags="all=-l=4" \
+            -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" \
+            -v ./main
+          chmod +x build_assets/xray
+
+      - name: Verify binary architecture
+        run: |
+          file build_assets/xray
+          if ! file build_assets/xray | grep -q 'ARM aarch64'; then
+            echo "::error::Built binary is not a Linux ARM64 (aarch64) executable"
+            exit 1
+          fi
+          echo "Architecture check passed: Linux ARM64 (aarch64)"
+
+      - name: Verify xray version via QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static
+          qemu-aarch64-static build_assets/xray version | tee version.txt
+          grep -q 'linux/arm64' version.txt
+          echo "xray version check passed: binary reports linux/arm64"
+
+      - name: Create archive
+        run: |
+          tar -czf xray-linux-arm64.tar.gz -C build_assets xray
+          sha256sum xray-linux-arm64.tar.gz > xray-linux-arm64.tar.gz.sha256
+          echo "Archive contents:"
+          tar -tzvf xray-linux-arm64.tar.gz
+          ls -lh xray-linux-arm64.tar.gz
+          cat xray-linux-arm64.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xray-linux-arm64
+          path: |
+            xray-linux-arm64.tar.gz
+            xray-linux-arm64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
